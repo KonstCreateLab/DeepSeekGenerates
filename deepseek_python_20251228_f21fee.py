@@ -1,279 +1,338 @@
-import pygame
-import numpy as np
-import random
-import noise
-import json
+import sys
 import os
-from pygame.locals import *
-from collections import defaultdict
+import time
+from PyQt5.QtWidgets import *
+from PyQt5.QtCore import *
+from PyQt5.QtGui import *
+from pygame import mixer
 
-class VoxelEngine:
-    def __init__(self, width=800, height=600):
-        pygame.init()
-        self.width = width
-        self.height = height
-        self.screen = pygame.display.set_mode((width, height))
-        pygame.display.set_caption("PyCraft")
+class MusicPlayer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.current_volume = 50
+        self.current_position = 0
+        self.playlist = []
+        self.current_song_index = -1
+        self.is_playing = False
+        self.start_time = 0  # Время начала воспроизведения
+        self.paused_time = 0  # Время на момент паузы
+        mixer.init()
+        self.init_ui()
         
-        self.clock = pygame.time.Clock()
-        self.FPS = 60
+    def init_ui(self):
+        # Настройка главного окна
+        self.setWindowTitle('Музыкальный проигрыватель')
+        self.setGeometry(100, 100, 800, 600)
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+            }
+            QPushButton {
+                background-color: #4a4a4a;
+                color: white;
+                border: none;
+                padding: 8px;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #5a5a5a;
+            }
+            QListWidget {
+                background-color: #3a3a3a;
+                color: white;
+                border: none;
+                font-size: 14px;
+            }
+            QSlider {
+                background-color: transparent;
+            }
+            QLabel {
+                color: white;
+                font-size: 14px;
+            }
+        """)
         
-        # Параметры мира
-        self.WORLD_SIZE = 128  # Увеличьте до 512 или 1024 для большего мира
-        self.CHUNK_SIZE = 16
-        self.RENDER_DISTANCE = 8
+        # Центральный виджет
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         
-        # Генерация текстур (упрощенно)
-        self.textures = self.generate_textures()
+        # Панель информации о треке
+        info_panel = QHBoxLayout()
+        self.song_label = QLabel('Трек не выбран')
+        self.song_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        info_panel.addWidget(self.song_label)
+        info_panel.addStretch()
         
-        # Камера
-        self.camera_pos = [self.WORLD_SIZE//2, 20, self.WORLD_SIZE//2]
-        self.camera_rot = [0, 0]
+        # Время трека
+        self.time_label = QLabel('00:00 / 00:00')
+        info_panel.addWidget(self.time_label)
         
-        # Мир
-        self.world = {}
-        self.generate_world()
+        main_layout.addLayout(info_panel)
         
-        # UI
-        self.font = pygame.font.SysFont('arial', 24)
+        # Прогресс трека
+        self.progress_slider = QSlider(Qt.Horizontal)
+        self.progress_slider.setRange(0, 1000)
+        self.progress_slider.sliderMoved.connect(self.seek_position)
+        self.progress_slider.sliderPressed.connect(self.slider_pressed)
+        self.progress_slider.sliderReleased.connect(self.slider_released)
+        main_layout.addWidget(self.progress_slider)
         
-        # Сохранение
-        self.save_file = "world.json"
+        # Кнопки управления
+        controls_layout = QHBoxLayout()
         
-    def generate_textures(self):
-        """Создание простых текстур"""
-        textures = {}
-        colors = {
-            'grass': (34, 139, 34),
-            'dirt': (101, 67, 33),
-            'stone': (128, 128, 128),
-            'sand': (194, 178, 128),
-            'wood': (101, 67, 33),
-            'leaf': (34, 139, 34),
-            'water': (30, 144, 255),
-            'cloud': (255, 255, 255)
-        }
+        self.prev_button = QPushButton('⏮')
+        self.prev_button.clicked.connect(self.prev_song)
+        self.prev_button.setFixedSize(50, 50)
         
-        for name, color in colors.items():
-            tex = pygame.Surface((16, 16))
-            tex.fill(color)
-            # Добавляем простой шум для текстуры
-            for i in range(50):
-                x = random.randint(0, 15)
-                y = random.randint(0, 15)
-                shade = random.randint(-20, 20)
-                tex.set_at((x, y), (
-                    max(0, min(255, color[0] + shade)),
-                    max(0, min(255, color[1] + shade)),
-                    max(0, min(255, color[2] + shade))
-                ))
-            textures[name] = tex
+        self.play_button = QPushButton('▶')
+        self.play_button.clicked.connect(self.toggle_play)
+        self.play_button.setFixedSize(60, 60)
+        
+        self.next_button = QPushButton('⏭')
+        self.next_button.clicked.connect(self.next_song)
+        self.next_button.setFixedSize(50, 50)
+        
+        controls_layout.addStretch()
+        controls_layout.addWidget(self.prev_button)
+        controls_layout.addWidget(self.play_button)
+        controls_layout.addWidget(self.next_button)
+        controls_layout.addStretch()
+        
+        main_layout.addLayout(controls_layout)
+        
+        # Громкость
+        volume_layout = QHBoxLayout()
+        volume_layout.addWidget(QLabel('Громкость:'))
+        
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(self.current_volume)
+        self.volume_slider.valueChanged.connect(self.set_volume)
+        volume_layout.addWidget(self.volume_slider)
+        
+        main_layout.addLayout(volume_layout)
+        
+        # Список воспроизведения
+        self.playlist_widget = QListWidget()
+        self.playlist_widget.itemDoubleClicked.connect(self.play_selected_song)
+        main_layout.addWidget(QLabel('Плейлист:'))
+        main_layout.addWidget(self.playlist_widget)
+        
+        # Кнопки управления плейлистом
+        playlist_controls = QHBoxLayout()
+        
+        self.add_button = QPushButton('Добавить файлы')
+        self.add_button.clicked.connect(self.add_songs)
+        
+        self.remove_button = QPushButton('Удалить выбранное')
+        self.remove_button.clicked.connect(self.remove_song)
+        
+        self.clear_button = QPushButton('Очистить плейлист')
+        self.clear_button.clicked.connect(self.clear_playlist)
+        
+        playlist_controls.addWidget(self.add_button)
+        playlist_controls.addWidget(self.remove_button)
+        playlist_controls.addWidget(self.clear_button)
+        playlist_controls.addStretch()
+        
+        main_layout.addLayout(playlist_controls)
+        
+        # Таймер для обновления прогресса
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_progress)
+        self.timer.start(100)  # Обновление каждые 100 мс для плавности
+        
+        # Переменные для отслеживания времени
+        self.slider_dragging = False
+        self.current_song_length = 0
+        
+    def add_songs(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, 
+            'Выберите музыкальные файлы',
+            '',
+            'Audio Files (*.mp3 *.wav *.ogg *.flac)'
+        )
+        
+        for file in files:
+            self.playlist.append(file)
+            filename = os.path.basename(file)
+            self.playlist_widget.addItem(filename)
             
-        return textures
+        if self.current_song_index == -1 and self.playlist:
+            self.current_song_index = 0
+            self.load_song(self.current_song_index)
     
-    def generate_world(self):
-        """Генерация процедурного мира"""
-        print("Генерация мира...")
-        
-        # Используем шум Перлина для генерации высот
-        scale = 100.0
-        octaves = 6
-        persistence = 0.5
-        lacunarity = 2.0
-        
-        for x in range(self.WORLD_SIZE):
-            for z in range(self.WORLD_SIZE):
-                # Высота базового рельефа
-                height = int(noise.pnoise2(x/scale, z/scale, 
-                                          octaves=octaves,
-                                          persistence=persistence,
-                                          lacunarity=lacunarity) * 20 + 20)
-                
-                # Дополнительные детали
-                detail = int(noise.pnoise2(x/25, z/25) * 5)
-                height += detail
-                
-                # Создаем столбец блоков
-                for y in range(height):
-                    if y == height - 1:
-                        block_type = 'grass' if random.random() > 0.1 else 'dirt'
-                    elif y > height - 5:
-                        block_type = 'dirt'
-                    else:
-                        if random.random() > 0.9 and y > 10:
-                            block_type = 'stone'
-                        else:
-                            block_type = 'dirt'
-                    
-                    self.world[(x, y, z)] = block_type
-                
-                # Вода
-                water_level = 15
-                if height < water_level:
-                    for y in range(height, water_level):
-                        self.world[(x, y, z)] = 'water'
-                
-                # Деревья
-                if height > water_level and random.random() > 0.99:
-                    tree_height = random.randint(4, 7)
-                    # Ствол
-                    for y in range(height, height + tree_height):
-                        self.world[(x, y, z)] = 'wood'
-                    
-                    # Листва
-                    for dx in range(-2, 3):
-                        for dy in range(-2, 3):
-                            for dz in range(-2, 3):
-                                if abs(dx) + abs(dy) + abs(dz) < 4:
-                                    self.world[(x+dx, height+tree_height+dy, z+dz)] = 'leaf'
+    def remove_song(self):
+        current_row = self.playlist_widget.currentRow()
+        if current_row >= 0:
+            self.playlist_widget.takeItem(current_row)
+            del self.playlist[current_row]
+            
+            if current_row == self.current_song_index:
+                self.stop_music()
+                self.current_song_index = -1
+                if self.playlist:
+                    self.current_song_index = min(current_row, len(self.playlist) - 1)
+                    self.load_song(self.current_song_index)
     
-    def project_point(self, point):
-        """Простая 3D проекция"""
-        x, y, z = point
-        
-        # Относительно камеры
-        x -= self.camera_pos[0]
-        y -= self.camera_pos[1]
-        z -= self.camera_pos[2]
-        
-        # Простая перспектива
-        fov = 256
-        factor = fov / (z + fov)
-        
-        screen_x = int(x * factor + self.width/2)
-        screen_y = int(-y * factor + self.height/2)
-        
-        return screen_x, screen_y, factor
+    def clear_playlist(self):
+        self.playlist_widget.clear()
+        self.playlist = []
+        self.stop_music()
+        self.current_song_index = -1
+        self.song_label.setText('Трек не выбран')
+        self.time_label.setText('00:00 / 00:00')
+        self.progress_slider.setValue(0)
     
-    def draw_block(self, pos, block_type):
-        """Рисование одного блока"""
-        if block_type not in self.textures:
+    def load_song(self, index):
+        if 0 <= index < len(self.playlist):
+            mixer.music.load(self.playlist[index])
+            filename = os.path.basename(self.playlist[index])
+            self.song_label.setText(f'Сейчас играет: {filename}')
+            self.playlist_widget.setCurrentRow(index)
+            
+            # Получаем длину трека
+            try:
+                sound = mixer.Sound(self.playlist[index])
+                self.current_song_length = sound.get_length()
+            except:
+                self.current_song_length = 0
+                
+            # Сбрасываем таймеры
+            self.start_time = time.time()
+            self.paused_time = 0
+            self.progress_slider.setValue(0)
+    
+    def play_selected_song(self, item):
+        index = self.playlist_widget.row(item)
+        if index != self.current_song_index or not self.is_playing:
+            self.current_song_index = index
+            self.load_song(index)
+            self.play_music()
+        else:
+            self.pause_music()
+    
+    def toggle_play(self):
+        if not self.playlist:
             return
             
-        screen_pos = self.project_point(pos)
-        if screen_pos[2] > 0:  # Только если блок перед камерой
-            size = max(4, int(16 * screen_pos[2]))
-            tex = pygame.transform.scale(self.textures[block_type], (size, size))
-            self.screen.blit(tex, (screen_pos[0] - size//2, screen_pos[1] - size//2))
+        if not self.is_playing:
+            if self.current_song_index == -1:
+                self.current_song_index = 0
+                self.load_song(self.current_song_index)
+            self.play_music()
+        else:
+            self.pause_music()
     
-    def handle_input(self):
-        """Обработка ввода"""
-        keys = pygame.key.get_pressed()
-        speed = 0.5
-        
-        # Движение
-        if keys[K_w]:
-            self.camera_pos[2] += speed
-        if keys[K_s]:
-            self.camera_pos[2] -= speed
-        if keys[K_a]:
-            self.camera_pos[0] -= speed
-        if keys[K_d]:
-            self.camera_pos[0] += speed
-        if keys[K_SPACE]:
-            self.camera_pos[1] += speed
-        if keys[K_LSHIFT]:
-            self.camera_pos[1] -= speed
-        
-        # Вращение камеры мышью
-        if pygame.mouse.get_focused():
-            dx, dy = pygame.mouse.get_rel()
-            self.camera_rot[0] += dx * 0.2
-            self.camera_rot[1] = max(-90, min(90, self.camera_rot[1] + dy * 0.2))
-            pygame.mouse.set_pos(self.width//2, self.height//2)
+    def play_music(self):
+        if self.current_song_index >= 0:
+            if self.paused_time > 0:
+                # Продолжаем с места паузы
+                mixer.music.play(start=self.paused_time)
+                self.start_time = time.time() - self.paused_time
+                self.paused_time = 0
+            else:
+                mixer.music.play()
+                self.start_time = time.time()
+            
+            self.is_playing = True
+            self.play_button.setText('⏸')
+            mixer.music.set_volume(self.current_volume / 100)
     
-    def draw_ui(self):
-        """Рисование интерфейса"""
-        # FPS
-        fps_text = self.font.render(f"FPS: {int(self.clock.get_fps())}", True, (255, 255, 255))
-        self.screen.blit(fps_text, (10, 10))
-        
-        # Позиция
-        pos_text = self.font.render(
-            f"Pos: {int(self.camera_pos[0])}, {int(self.camera_pos[1])}, {int(self.camera_pos[2])}", 
-            True, (255, 255, 255)
-        )
-        self.screen.blit(pos_text, (10, 40))
-        
-        # Инструкции
-        inst_text = self.font.render("WASD: Движение, SPACE/SHIFT: Вверх/Вниз, ESC: Выход", True, (255, 255, 255))
-        self.screen.blit(inst_text, (10, self.height - 30))
+    def pause_music(self):
+        if self.is_playing:
+            mixer.music.pause()
+            self.paused_time = time.time() - self.start_time
+            self.is_playing = False
+            self.play_button.setText('▶')
     
-    def save_world(self):
-        """Сохранение мира в файл"""
-        try:
-            with open(self.save_file, 'w') as f:
-                json.dump({str(k): v for k, v in self.world.items()}, f)
-            print("Мир сохранен!")
-        except Exception as e:
-            print(f"Ошибка сохранения: {e}")
+    def stop_music(self):
+        mixer.music.stop()
+        self.is_playing = False
+        self.play_button.setText('▶')
+        self.paused_time = 0
+        self.progress_slider.setValue(0)
+        self.time_label.setText('00:00 / 00:00')
     
-    def load_world(self):
-        """Загрузка мира из файла"""
-        if os.path.exists(self.save_file):
-            try:
-                with open(self.save_file, 'r') as f:
-                    data = json.load(f)
-                    self.world = {eval(k): v for k, v in data.items()}
-                print("Мир загружен!")
-            except Exception as e:
-                print(f"Ошибка загрузки: {e}")
+    def prev_song(self):
+        if not self.playlist:
+            return
+            
+        self.stop_music()
+        self.current_song_index = (self.current_song_index - 1) % len(self.playlist)
+        self.load_song(self.current_song_index)
+        self.play_music()
     
-    def run(self):
-        """Главный игровой цикл"""
-        running = True
-        
-        while running:
-            # Обработка событий
-            for event in pygame.event.get():
-                if event.type == QUIT:
-                    running = False
-                elif event.type == KEYDOWN:
-                    if event.key == K_ESCAPE:
-                        running = False
-                    elif event.key == K_p:
-                        self.save_world()
-                    elif event.key == K_l:
-                        self.load_world()
-                    elif event.key == K_r:
-                        self.world = {}
-                        self.generate_world()
+    def next_song(self):
+        if not self.playlist:
+            return
             
-            # Обновление
-            self.handle_input()
-            
-            # Отрисовка
-            self.screen.fill((135, 206, 235))  # Цвет неба
-            
-            # Рисование мира (оптимизированно)
-            chunks_to_render = []
-            camera_chunk = (
-                int(self.camera_pos[0] // self.CHUNK_SIZE),
-                int(self.camera_pos[2] // self.CHUNK_SIZE)
-            )
-            
-            # Собираем блоки для отрисовки
-            for dx in range(-self.RENDER_DISTANCE, self.RENDER_DISTANCE + 1):
-                for dz in range(-self.RENDER_DISTANCE, self.RENDER_DISTANCE + 1):
-                    chunk_x = camera_chunk[0] + dx
-                    chunk_z = camera_chunk[1] + dz
-                    
-                    # Рисуем блоки в чанке
-                    for x in range(chunk_x * self.CHUNK_SIZE, (chunk_x + 1) * self.CHUNK_SIZE):
-                        for z in range(chunk_z * self.CHUNK_SIZE, (chunk_z + 1) * self.CHUNK_SIZE):
-                            for y in range(64):  # Максимальная высота
-                                if (x, y, z) in self.world:
-                                    self.draw_block((x, y, z), self.world[(x, y, z)])
-            
-            # UI
-            self.draw_ui()
-            
-            # Обновление экрана
-            pygame.display.flip()
-            self.clock.tick(self.FPS)
-        
-        pygame.quit()
+        self.stop_music()
+        self.current_song_index = (self.current_song_index + 1) % len(self.playlist)
+        self.load_song(self.current_song_index)
+        self.play_music()
+    
+    def set_volume(self, value):
+        self.current_volume = value
+        mixer.music.set_volume(value / 100)
+    
+    def slider_pressed(self):
+        self.slider_dragging = True
+    
+    def slider_released(self):
+        self.slider_dragging = False
+        if self.is_playing and self.current_song_length > 0:
+            position = self.progress_slider.value() / 1000
+            seek_pos = position * self.current_song_length
+            mixer.music.play(start=seek_pos)
+            self.start_time = time.time() - seek_pos
+    
+    def seek_position(self, position):
+        # Обновляем слайдер при перетаскивании
+        if self.slider_dragging and self.current_song_length > 0:
+            current_time = (position / 1000) * self.current_song_length
+            total_time = self.current_song_length
+            self.time_label.setText(f'{self.format_time(current_time)} / {self.format_time(total_time)}')
+    
+    def update_progress(self):
+        if self.is_playing and self.current_song_index >= 0 and not self.slider_dragging:
+            if self.current_song_length > 0:
+                # Рассчитываем текущее время
+                current_time = time.time() - self.start_time
+                
+                # Проверяем, не закончился ли трек
+                if current_time >= self.current_song_length:
+                    self.next_song()
+                    return
+                
+                # Обновляем слайдер
+                progress = (current_time / self.current_song_length) * 1000
+                self.progress_slider.setValue(int(progress))
+                
+                # Обновляем время
+                total_time = self.current_song_length
+                self.time_label.setText(f'{self.format_time(current_time)} / {self.format_time(total_time)}')
+    
+    def format_time(self, seconds):
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f'{minutes:02d}:{seconds:02d}'
+    
+    def closeEvent(self, event):
+        mixer.music.stop()
+        mixer.quit()
+        event.accept()
 
-if __name__ == "__main__":
-    game = VoxelEngine()
-    game.run()
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    
+    # Установка стиля
+    app.setStyle('Fusion')
+    
+    player = MusicPlayer()
+    player.show()
+    
+    sys.exit(app.exec_())
